@@ -3,7 +3,6 @@
 # ── Stage 1: Build the Rust/WASM rewriter ──────────────────────────────────
 FROM rust:slim-bookworm AS wasm-builder
 
-# Install system deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl bash ca-certificates build-essential pkg-config \
     && rm -rf /var/lib/apt/lists/*
@@ -16,16 +15,29 @@ RUN rustup toolchain install nightly \
 # Install wasm-bindgen-cli (exact version required by build.sh)
 RUN cargo install wasm-bindgen-cli --version 0.2.105 --locked
 
-# Install binaryen (wasm-opt) and wasm-snip
+# Install binaryen (wasm-opt) - skip wasm-snip, it's incompatible with anyref types
 RUN curl -L https://github.com/WebAssembly/binaryen/releases/download/version_119/binaryen-version_119-x86_64-linux.tar.gz \
-    | tar xz --strip-components=1 -C /usr/local \
-    && cargo install wasm-snip --locked
+    | tar xz --strip-components=1 -C /usr/local
 
 WORKDIR /app
 COPY packages/core/rewriter ./packages/core/rewriter
 
-# Build WASM with RELEASE=1
-RUN cd packages/core/rewriter/wasm && RELEASE=1 bash build.sh
+# Build WASM: compile with cargo, run wasm-bindgen, then wasm-opt
+# We bypass build.sh's wasm-snip step (incompatible with anyref types) and run the steps manually
+RUN set -eux; \
+    cd packages/core/rewriter; \
+    export RUSTFLAGS='-Zlocation-detail=none -Zfmt-debug=none'; \
+    cargo +nightly build --release --target wasm32-unknown-unknown \
+        -Z build-std=panic_abort,std -Z build-std-features=optimize_for_size \
+        --no-default-features --features ""; \
+    wasm-bindgen --target web --out-dir wasm/out/ \
+        target/wasm32-unknown-unknown/release/wasm.wasm; \
+    sed -i 's/import.meta.url/""/g' wasm/out/wasm.js; \
+    cd ../..; \
+    mkdir -p packages/core/dist/; \
+    wasm-opt wasm/out/wasm_bg.wasm -o packages/core/dist/scramjet.wasm \
+        --converge -tnh --vacuum -O4 -Oz || \
+    cp wasm/out/wasm_bg.wasm packages/core/dist/scramjet.wasm
 
 # ── Stage 2: Build JS bundles + demo ───────────────────────────────────────
 FROM node:24-slim AS js-builder
@@ -34,18 +46,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Install pnpm
 RUN npm install -g pnpm@10.12.1
 
 WORKDIR /app
-
-# Copy the full repo
 COPY . .
 
 # Copy compiled WASM from stage 1
 COPY --from=wasm-builder /app/packages/core/dist/scramjet.wasm ./packages/core/dist/scramjet.wasm
 
-# Install deps
 RUN pnpm install --frozen-lockfile
 
 # Build all JS bundles (rspack: core, controller, utils, bootstrap)
@@ -65,7 +73,6 @@ RUN npm install -g pnpm@10.12.1
 
 WORKDIR /app
 
-# Copy everything needed to run devserver.ts
 COPY --from=js-builder /app/package.json ./package.json
 COPY --from=js-builder /app/pnpm-lock.yaml ./pnpm-lock.yaml
 COPY --from=js-builder /app/pnpm-workspace.yaml ./pnpm-workspace.yaml
