@@ -12,32 +12,37 @@ RUN rustup toolchain install nightly \
     && rustup target add wasm32-unknown-unknown --toolchain nightly \
     && rustup component add rust-src --toolchain nightly
 
-# Install wasm-bindgen-cli (exact version required by build.sh)
+# Install wasm-bindgen-cli (exact version required)
 RUN cargo install wasm-bindgen-cli --version 0.2.105 --locked
 
-# Install binaryen (wasm-opt) - skip wasm-snip, it's incompatible with anyref types
+# Install binaryen (wasm-opt)
 RUN curl -L https://github.com/WebAssembly/binaryen/releases/download/version_119/binaryen-version_119-x86_64-linux.tar.gz \
     | tar xz --strip-components=1 -C /usr/local
 
 WORKDIR /app
 COPY packages/core/rewriter ./packages/core/rewriter
 
-# Build WASM: compile with cargo, run wasm-bindgen, then wasm-opt
-# We bypass build.sh's wasm-snip step (incompatible with anyref types) and run the steps manually
+# Build WASM with absolute paths throughout
 RUN set -eux; \
-    cd packages/core/rewriter; \
     export RUSTFLAGS='-Zlocation-detail=none -Zfmt-debug=none'; \
-    cargo +nightly build --release --target wasm32-unknown-unknown \
-        -Z build-std=panic_abort,std -Z build-std-features=optimize_for_size \
-        --no-default-features --features ""; \
-    wasm-bindgen --target web --out-dir wasm/out/ \
-        target/wasm32-unknown-unknown/release/wasm.wasm; \
-    sed -i 's/import.meta.url/""/g' wasm/out/wasm.js; \
-    cd ../..; \
-    mkdir -p packages/core/dist/; \
-    wasm-opt wasm/out/wasm_bg.wasm -o packages/core/dist/scramjet.wasm \
-        --converge -tnh --vacuum -O4 -Oz || \
-    cp wasm/out/wasm_bg.wasm packages/core/dist/scramjet.wasm
+    cargo +nightly build --release \
+        --manifest-path /app/packages/core/rewriter/Cargo.toml \
+        --target wasm32-unknown-unknown \
+        -Z build-std=panic_abort,std \
+        -Z build-std-features=optimize_for_size \
+        --no-default-features; \
+    mkdir -p /app/packages/core/rewriter/wasm/out; \
+    wasm-bindgen \
+        --target web \
+        --out-dir /app/packages/core/rewriter/wasm/out/ \
+        /app/packages/core/rewriter/target/wasm32-unknown-unknown/release/wasm.wasm; \
+    sed -i 's/import.meta.url/""/g' /app/packages/core/rewriter/wasm/out/wasm.js; \
+    mkdir -p /app/packages/core/dist/; \
+    wasm-opt /app/packages/core/rewriter/wasm/out/wasm_bg.wasm \
+        -o /app/packages/core/dist/scramjet.wasm \
+        --converge -tnh --vacuum -O4 -Oz \
+    || cp /app/packages/core/rewriter/wasm/out/wasm_bg.wasm \
+          /app/packages/core/dist/scramjet.wasm
 
 # ── Stage 2: Build JS bundles + demo ───────────────────────────────────────
 FROM node:24-slim AS js-builder
